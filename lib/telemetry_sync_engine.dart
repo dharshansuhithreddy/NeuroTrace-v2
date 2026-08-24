@@ -7,17 +7,17 @@ class TelemetrySyncEngine {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
   Future<void> syncPendingData(String participantId) async {
-    debugPrint("🛠️ [SYNC_ENGINE] 1. Starting direct SQLite background sync for: $participantId");
+    debugPrint("🛠️ [SYNC_ENGINE] 1. Starting RAW SQLite background sync for: $participantId");
 
     try {
       final db = await SQLiteHelper.instance.database;
       debugPrint("🛠️ [SYNC_ENGINE] 2. SQLite Database instance acquired.");
 
+      // Swapped to new Raw Telemetry schemas
       final List<String> tables = [
-        'research_sessions',
-        'device_events',
-        'notifications',
-        'collector_health',
+        'raw_usage_events',
+        'raw_usage_stats',
+        'raw_system_events',
       ];
 
       List<Map<String, dynamic>> allPendingEvents = [];
@@ -29,7 +29,7 @@ class TelemetrySyncEngine {
           table,
           where: 'sync_status != ?',
           whereArgs: [1],
-          limit: 250,
+          limit: 300, // Slightly increased limit for higher data volume
         );
 
         if (rows.isNotEmpty) {
@@ -94,7 +94,7 @@ class TelemetrySyncEngine {
       try {
         final db = await SQLiteHelper.instance.database;
         final int now = DateTime.now().millisecondsSinceEpoch;
-        final List<String> tables = ['research_sessions', 'device_events', 'notifications', 'collector_health'];
+        final List<String> tables = ['raw_usage_events', 'raw_usage_stats', 'raw_system_events'];
 
         for (String table in tables) {
           await db.rawUpdate(

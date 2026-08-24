@@ -1,13 +1,13 @@
 {
   "project_info": {
-    "project_number": "273239883428",
-    "project_id": "neurotracev2",
-    "storage_bucket": "neurotracev2.firebasestorage.app"
+    "project_number": "234428288159",
+    "project_id": "neurotrace-research-v2",
+    "storage_bucket": "neurotrace-research-v2.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:273239883428:android:0111afa2e5c43e05d37031",
+        "mobilesdk_app_id": "1:234428288159:android:975ca43a1bb5156da9a6aa",
         "android_client_info": {
           "package_name": "com.neurotrace_v2.neurotrace_v2"
         }
@@ -15,7 +15,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyDrzsItSrZ6bTFdNG-tmt6dnRF6rzjMGTA"
+          "current_key": "AIzaSyByJekPHrhzGRb3wFT5c9r3YxRYTT41hTI"
         }
       ],
       "services": {

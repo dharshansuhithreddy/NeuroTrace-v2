@@ -1,29 +1,20 @@
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart'; // Added for debugPrint
-import '../../core/database/sqlite_helper.dart';
+import 'package:flutter/foundation.dart';
 
 class SystemEventCollector {
-  // A dedicated Method Channel for system-level broadcasts.
-  // ignore: unused_field
   static const MethodChannel _channel = MethodChannel('com.neurotrace/system_events');
 
-  // Called from native Android BroadcastReceivers (e.g., ACTION_SCREEN_ON)
-  static Future<void> storeSystemEvent(String eventType, {int? value}) async {
-    try {
-      final db = await SQLiteHelper.instance.database;
+  static void setupMethodChannel() {
+    _channel.setMethodCallHandler((MethodCall call) async {
+      // ARCHITECTURE UPDATE:
+      // System broadcasts are now saved directly to SQLite by the native EventReceiver.kt.
+      // This receiver just acts as a debug monitor so you can see events in your Flutter terminal.
+      // No data is written to the database from this file.
 
-      // Precise immutable timestamp
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-
-      await db.insert('raw_system_events', {
-        'timestamp': timestamp,
-        'event_type': eventType,
-        'value': value ?? 0, // 0 if no specific value is passed
-      });
-
-      debugPrint("Logged system event: $eventType (Value: ${value ?? 0})");
-    } catch (e) {
-      debugPrint("Error logging system event: $e");
-    }
+      if (call.method == "storeSystemEvent") {
+        final Map<String, dynamic> args = Map<String, dynamic>.from(call.arguments);
+        debugPrint("⚡ [SYSTEM EVENT] Broadcast intercepted and stored natively: ${args['eventType']}");
+      }
+    });
   }
 }

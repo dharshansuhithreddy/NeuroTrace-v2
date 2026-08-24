@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -11,7 +12,12 @@ import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
+import java.io.FileWriter
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.HashMap
+import java.util.Locale
 
 class MainActivity : FlutterActivity() {
 
@@ -44,29 +50,29 @@ class MainActivity : FlutterActivity() {
                         val dbHelper = DatabaseHelper(this)
                         val db = dbHelper.readableDatabase
 
-                        val totalCursor = db.rawQuery("SELECT COUNT(*) FROM ${DatabaseHelper.TABLE_DEVICE_EVENTS}", null)
-                        var totalEvents = 0
+                        // Count Raw Usage Events
+                        val totalCursor = db.rawQuery("SELECT COUNT(*) FROM ${DatabaseHelper.TABLE_RAW_USAGE_EVENTS}", null)
+                        var usageEvents = 0
                         if (totalCursor.moveToFirst()) {
-                            totalEvents = totalCursor.getInt(0)
+                            usageEvents = totalCursor.getInt(0)
                         }
                         totalCursor.close()
 
-                        val validatedCursor = db.rawQuery(
-                            "SELECT COUNT(*) FROM ${DatabaseHelper.TABLE_DEVICE_EVENTS} WHERE event_type NOT IN ('SCREEN_ON', 'SCREEN_OFF', 'DEVICE_UNLOCK')",
-                            null
-                        )
-                        var validatedSessions = 0
-                        if (validatedCursor.moveToFirst()) {
-                            validatedSessions = validatedCursor.getInt(0)
+                        // Count Raw System Events
+                        val systemCursor = db.rawQuery("SELECT COUNT(*) FROM ${DatabaseHelper.TABLE_RAW_SYSTEM_EVENTS}", null)
+                        var systemEvents = 0
+                        if (systemCursor.moveToFirst()) {
+                            systemEvents = systemCursor.getInt(0)
                         }
-                        validatedCursor.close()
+                        systemCursor.close()
                         db.close()
 
                         val isServiceRunning = isCollectionServiceRunning(CollectionService::class.java)
 
                         val statsMap = HashMap<String, Any>()
-                        statsMap["total_events"] = totalEvents
-                        statsMap["validated_sessions"] = validatedSessions
+                        statsMap["total_events"] = usageEvents + systemEvents
+                        // In raw collection, all events are considered valid for the UI dashboard
+                        statsMap["validated_sessions"] = usageEvents
                         statsMap["is_service_running"] = isServiceRunning
 
                         result.success(statsMap)
@@ -77,8 +83,7 @@ class MainActivity : FlutterActivity() {
 
                 "triggerCsvExport" -> {
                     try {
-                        val dbHelper = DatabaseHelper(this)
-                        val resultPath = dbHelper.exportDatabaseToCSV(this)
+                        val resultPath = exportRawDatabaseToCSV(this)
                         result.success(resultPath)
                     } catch (e: Exception) {
                         result.error("EXPORT_FAILED", "Telemetry dataset compilation aborted: ${e.message}", null)
@@ -89,15 +94,17 @@ class MainActivity : FlutterActivity() {
                     try {
                         val dbHelper = DatabaseHelper(this)
                         val db = dbHelper.readableDatabase
-                        val cursor = db.query(DatabaseHelper.TABLE_DEVICE_EVENTS, null, null, null, null, null, "timestamp DESC")
+
+                        // Query the new raw usage events table for UI debugging
+                        val cursor = db.query(DatabaseHelper.TABLE_RAW_USAGE_EVENTS, null, null, null, null, null, "timestamp DESC", "100")
                         val usageList = ArrayList<Map<String, Any>>()
 
                         while (cursor.moveToNext()) {
                             val timestamp = cursor.getLong(cursor.getColumnIndexOrThrow("timestamp"))
-                            val packageName = cursor.getString(cursor.getColumnIndexOrThrow("event_type"))
+                            val packageName = cursor.getString(cursor.getColumnIndexOrThrow("packageName")) ?: "unknown_package"
                             val map = HashMap<String, Any>()
                             map["timestamp"] = timestamp
-                            map["packageName"] = packageName
+                            map["packageName"] = packageName // Retained UI expected keys
                             usageList.add(map)
                         }
                         cursor.close()
@@ -108,14 +115,13 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
-                // --- Fetch only pending items for Firestore Sync ---
                 "fetchPendingLocalData" -> {
                     try {
                         val dbHelper = DatabaseHelper(this)
                         val db = dbHelper.readableDatabase
 
                         val cursor = db.rawQuery(
-                            "SELECT id, timestamp, event_type FROM ${DatabaseHelper.TABLE_DEVICE_EVENTS} WHERE sync_status = 0 OR (sync_status = 2 AND retry_count < 5) ORDER BY timestamp ASC LIMIT 400",
+                            "SELECT id, timestamp, packageName FROM ${DatabaseHelper.TABLE_RAW_USAGE_EVENTS} WHERE sync_status = 0 OR (sync_status = 2 AND retry_count < 5) ORDER BY timestamp ASC LIMIT 400",
                             null
                         )
 
@@ -124,7 +130,7 @@ class MainActivity : FlutterActivity() {
                             val map = HashMap<String, Any>()
                             map["id"] = cursor.getInt(cursor.getColumnIndexOrThrow("id")).toString()
                             map["timestamp"] = cursor.getLong(cursor.getColumnIndexOrThrow("timestamp"))
-                            map["packageName"] = cursor.getString(cursor.getColumnIndexOrThrow("event_type"))
+                            map["packageName"] = cursor.getString(cursor.getColumnIndexOrThrow("packageName")) ?: "unknown_package"
                             usageList.add(map)
                         }
                         cursor.close()
@@ -135,7 +141,6 @@ class MainActivity : FlutterActivity() {
                     }
                 }
 
-                // --- Atomic updates to SQLite after Firebase Sync attempt ---
                 "updateSyncStatus" -> {
                     try {
                         val ids = call.argument<List<String>>("ids")
@@ -152,7 +157,7 @@ class MainActivity : FlutterActivity() {
                         db.beginTransaction()
                         try {
                             if (status == 1) {
-                                val stmt = db.compileStatement("UPDATE ${DatabaseHelper.TABLE_DEVICE_EVENTS} SET sync_status = 1 WHERE id = ?")
+                                val stmt = db.compileStatement("UPDATE ${DatabaseHelper.TABLE_RAW_USAGE_EVENTS} SET sync_status = 1 WHERE id = ?")
                                 for (idStr in ids) {
                                     val idLong = idStr.toLongOrNull()
                                     if (idLong != null) {
@@ -163,7 +168,7 @@ class MainActivity : FlutterActivity() {
                             } else {
                                 val currentEpoch = System.currentTimeMillis()
                                 val stmt = db.compileStatement(
-                                    "UPDATE ${DatabaseHelper.TABLE_DEVICE_EVENTS} SET sync_status = 2, retry_count = retry_count + 1, last_sync_attempt = ? WHERE id = ?"
+                                    "UPDATE ${DatabaseHelper.TABLE_RAW_USAGE_EVENTS} SET sync_status = 2, retry_count = retry_count + 1, last_sync_attempt = ? WHERE id = ?"
                                 )
                                 for (idStr in ids) {
                                     val idLong = idStr.toLongOrNull()
@@ -269,5 +274,72 @@ class MainActivity : FlutterActivity() {
             }
         }
         return false
+    }
+
+    // --- Extracted CSV Logic to Handle the 3 Raw Data Tables ---
+    private fun exportRawDatabaseToCSV(context: Context): String {
+        val dbHelper = DatabaseHelper(context)
+        val db = dbHelper.readableDatabase
+        val exportDir = context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS)
+
+        if (exportDir?.exists() == false) {
+            exportDir.mkdirs()
+        }
+
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+
+        try {
+            // 1. Export Raw Usage Events
+            val cursorEvents = db.rawQuery("SELECT * FROM ${DatabaseHelper.TABLE_RAW_USAGE_EVENTS} ORDER BY timestamp ASC", null)
+            val fileEvents = File(exportDir, "NeuroTrace_RawUsageEvents_$timeStamp.csv")
+            writeCursorToCsv(cursorEvents, fileEvents)
+            cursorEvents.close()
+
+            // 2. Export Raw Usage Stats
+            val cursorStats = db.rawQuery("SELECT * FROM ${DatabaseHelper.TABLE_RAW_USAGE_STATS}", null)
+            val fileStats = File(exportDir, "NeuroTrace_RawUsageStats_$timeStamp.csv")
+            writeCursorToCsv(cursorStats, fileStats)
+            cursorStats.close()
+
+            // 3. Export Raw System Events
+            val cursorSystem = db.rawQuery("SELECT * FROM ${DatabaseHelper.TABLE_RAW_SYSTEM_EVENTS} ORDER BY timestamp ASC", null)
+            val fileSystem = File(exportDir, "NeuroTrace_RawSystemEvents_$timeStamp.csv")
+            writeCursorToCsv(cursorSystem, fileSystem)
+            cursorSystem.close()
+
+            db.close()
+            return "Exported 3 raw datasets to: ${exportDir?.absolutePath}"
+        } catch (e: Exception) {
+            db.close()
+            throw Exception("Failed to write CSV files: ${e.message}")
+        }
+    }
+
+    private fun writeCursorToCsv(cursor: Cursor, file: File) {
+        file.createNewFile()
+        val csvWrite = FileWriter(file)
+        val columnCount = cursor.columnCount
+
+        // Write Headers dynamically based on table schema
+        for (i in 0 until columnCount) {
+            csvWrite.append(cursor.getColumnName(i))
+            if (i < columnCount - 1) csvWrite.append(",")
+        }
+        csvWrite.append("\n")
+
+        // Write Rows dynamically
+        if (cursor.moveToFirst()) {
+            do {
+                for (i in 0 until columnCount) {
+                    val value = cursor.getString(i)?.replace(",", " ")?.replace("\n", " ") ?: "null"
+                    csvWrite.append(value)
+                    if (i < columnCount - 1) csvWrite.append(",")
+                }
+                csvWrite.append("\n")
+            } while (cursor.moveToNext())
+        }
+
+        csvWrite.flush()
+        csvWrite.close()
     }
 }

@@ -4,165 +4,143 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-import android.os.Environment
+import android.os.Build
 import android.util.Log
-import java.io.File
-import java.io.FileWriter
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class DatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
-    private val appContext = context.applicationContext
-
     companion object {
-        // MATCH FLUTTER EXACTLY
         private const val DATABASE_NAME = "neurotrace_v2.db"
-        private const val DATABASE_VERSION = 3
+        private const val DATABASE_VERSION = 4 // Incremented for new raw schema
 
-        // Target Flutter's existing device_events table instead of a ghost table
-        const val TABLE_DEVICE_EVENTS = "device_events"
+        const val TABLE_RAW_USAGE_EVENTS = "raw_usage_events"
+        const val TABLE_RAW_USAGE_STATS = "raw_usage_stats"
+        const val TABLE_RAW_SYSTEM_EVENTS = "raw_system_events"
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        // If the background service starts before Flutter, it must create the EXACT Flutter schemas.
         db.execSQL("""
-            CREATE TABLE research_sessions (
+            CREATE TABLE $TABLE_RAW_USAGE_EVENTS (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                research_id TEXT NOT NULL,
-                package_name TEXT NOT NULL,
-                start_timestamp INTEGER NOT NULL,
-                end_timestamp INTEGER NOT NULL,
-                duration_seconds INTEGER NOT NULL,
-                session_date TEXT NOT NULL,
-                day_of_week INTEGER NOT NULL,
-                hour_of_day INTEGER NOT NULL,
-                is_weekend INTEGER DEFAULT 0,
-                is_late_night INTEGER DEFAULT 0,
-                validation_version TEXT NOT NULL,
-                is_synced INTEGER DEFAULT 0,
+                packageName TEXT,
+                className TEXT,
+                eventType INTEGER,
+                timestamp INTEGER,
+                instanceId INTEGER,
+                taskRootPackageName TEXT,
+                taskRootClassName TEXT,
+                standbyBucket INTEGER,
+                configuration TEXT,
+                shortcutId TEXT,
+                notificationChannelId TEXT,
+                locusId TEXT,
                 sync_status INTEGER DEFAULT 0,
                 retry_count INTEGER DEFAULT 0,
                 last_sync_attempt INTEGER DEFAULT 0
             )
         """)
+
         db.execSQL("""
-            CREATE TABLE device_events (
+            CREATE TABLE $TABLE_RAW_USAGE_STATS (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                research_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                is_synced INTEGER DEFAULT 0,
+                packageName TEXT,
+                firstTimeStamp INTEGER,
+                lastTimeStamp INTEGER,
+                lastTimeUsed INTEGER,
+                totalTimeInForeground INTEGER,
+                lastTimeVisible INTEGER,
+                totalTimeVisible INTEGER,
+                lastTimeForegroundServiceUsed INTEGER,
+                totalTimeForegroundServiceUsed INTEGER,
                 sync_status INTEGER DEFAULT 0,
                 retry_count INTEGER DEFAULT 0,
                 last_sync_attempt INTEGER DEFAULT 0
             )
         """)
+
         db.execSQL("""
-            CREATE TABLE notifications (
+            CREATE TABLE $TABLE_RAW_SYSTEM_EVENTS (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                research_id TEXT NOT NULL,
-                package_name TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                is_synced INTEGER DEFAULT 0,
+                timestamp INTEGER,
+                event_type TEXT,
+                value TEXT,
+                extras TEXT,
+                source TEXT,
                 sync_status INTEGER DEFAULT 0,
                 retry_count INTEGER DEFAULT 0,
                 last_sync_attempt INTEGER DEFAULT 0
             )
         """)
-        db.execSQL("""
-            CREATE TABLE collector_health (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
-                app_version TEXT NOT NULL,
-                collector_version TEXT NOT NULL,
-                is_synced INTEGER DEFAULT 0,
-                sync_status INTEGER DEFAULT 0,
-                retry_count INTEGER DEFAULT 0,
-                last_sync_attempt INTEGER DEFAULT 0
-            )
-        """)
-        Log.d("NeuroTrace_DB", "Native DB Created matching Flutter Schema.")
+        Log.d("NeuroTrace_DB", "Native DB Created matching Raw Telemetry Schema.")
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Allow Flutter to be the master controller of complex schema upgrades
+        // Drop older tables if upgrading to raw pipeline
+        db.execSQL("DROP TABLE IF EXISTS research_sessions")
+        db.execSQL("DROP TABLE IF EXISTS device_events")
+        db.execSQL("DROP TABLE IF EXISTS notifications")
+        db.execSQL("DROP TABLE IF EXISTS collector_health")
+        onCreate(db)
     }
 
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
-        // CRITICAL: Ensure native writes do not lock the database when Flutter reads
-        db.enableWriteAheadLogging()
+        db.enableWriteAheadLogging() // Crucial for concurrent Flutter reads and Android writes
     }
 
-    // Function signature kept identical so CollectionService doesn't break
-    fun insertUsageEvent(timestamp: Long, packageName: String) {
-        val db = this.writableDatabase
-
-        // Magically extract the participant ID directly from Flutter's native prefs file!
-        val prefs = appContext.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-        val researchId = prefs.getString("flutter.research_id", "Unknown") ?: "Unknown"
-
-        val contentValues = ContentValues().apply {
-            // DO NOT insert 'id' -> SQLite will autoincrement it natively
-            put("research_id", researchId)
-            put("event_type", packageName) // Store package name in the event_type column
+    fun insertRawUsageEvent(
+        packageName: String?, className: String?, eventType: Int, timestamp: Long,
+        instanceId: Int?, taskRootPackageName: String?, taskRootClassName: String?,
+        standbyBucket: Int?, configuration: String?, shortcutId: String?,
+        notificationChannelId: String?, locusId: String?
+    ) {
+        val values = ContentValues().apply {
+            put("packageName", packageName)
+            put("className", className)
+            put("eventType", eventType)
             put("timestamp", timestamp)
-            put("is_synced", 0)
+            put("instanceId", instanceId)
+            put("taskRootPackageName", taskRootPackageName)
+            put("taskRootClassName", taskRootClassName)
+            put("standbyBucket", standbyBucket)
+            put("configuration", configuration)
+            put("shortcutId", shortcutId)
+            put("notificationChannelId", notificationChannelId)
+            put("locusId", locusId)
             put("sync_status", 0)
-            put("retry_count", 0)
-            put("last_sync_attempt", 0)
         }
-
-        val result = db.insert(TABLE_DEVICE_EVENTS, null, contentValues)
-        if (result == -1L) {
-            Log.e("NeuroTrace_DB", "Failed to insert into device_events")
-        } else {
-            Log.d("NeuroTrace_DB", "Native Insert Success: $packageName at $timestamp")
-        }
+        writableDatabase.insert(TABLE_RAW_USAGE_EVENTS, null, values)
     }
 
-    fun exportDatabaseToCSV(context: Context): String {
-        val db = this.readableDatabase
-        val cursor = db.rawQuery("SELECT * FROM $TABLE_DEVICE_EVENTS ORDER BY timestamp ASC", null)
-
-        val exportDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-        if (exportDir?.exists() == false) {
-            exportDir.mkdirs()
+    fun insertRawUsageStat(
+        packageName: String?, firstTimeStamp: Long, lastTimeStamp: Long, lastTimeUsed: Long,
+        totalTimeInForeground: Long, lastTimeVisible: Long?, totalTimeVisible: Long?,
+        lastTimeForegroundServiceUsed: Long?, totalTimeForegroundServiceUsed: Long?
+    ) {
+        val values = ContentValues().apply {
+            put("packageName", packageName)
+            put("firstTimeStamp", firstTimeStamp)
+            put("lastTimeStamp", lastTimeStamp)
+            put("lastTimeUsed", lastTimeUsed)
+            put("totalTimeInForeground", totalTimeInForeground)
+            put("lastTimeVisible", lastTimeVisible)
+            put("totalTimeVisible", totalTimeVisible)
+            put("lastTimeForegroundServiceUsed", lastTimeForegroundServiceUsed)
+            put("totalTimeForegroundServiceUsed", totalTimeForegroundServiceUsed)
+            put("sync_status", 0)
         }
+        writableDatabase.insert(TABLE_RAW_USAGE_STATS, null, values)
+    }
 
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val file = File(exportDir, "NeuroTrace_Data_$timeStamp.csv")
-
-        return try {
-            file.createNewFile()
-            val csvWrite = FileWriter(file)
-            csvWrite.append("ID,Research_ID,Event_Type,Timestamp_ms,Readable_Time,Sync_Status\n")
-
-            if (cursor.moveToFirst()) {
-                do {
-                    val id = cursor.getInt(cursor.getColumnIndexOrThrow("id"))
-                    val resId = cursor.getString(cursor.getColumnIndexOrThrow("research_id"))
-                    val eventType = cursor.getString(cursor.getColumnIndexOrThrow("event_type"))
-                    val timestamp = cursor.getLong(cursor.getColumnIndexOrThrow("timestamp"))
-                    val syncStatus = cursor.getInt(cursor.getColumnIndexOrThrow("sync_status"))
-
-                    val readableTime = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(timestamp))
-
-                    csvWrite.append("$id,$resId,$eventType,$timestamp,$readableTime,$syncStatus\n")
-                } while (cursor.moveToNext())
-            }
-
-            csvWrite.flush()
-            csvWrite.close()
-            cursor.close()
-
-            "Success! File saved to: ${file.absolutePath}"
-        } catch (e: Exception) {
-            cursor.close()
-            "Export Failed: ${e.message}"
+    fun insertRawSystemEvent(timestamp: Long, eventType: String, value: String? = null, extras: String? = null) {
+        val values = ContentValues().apply {
+            put("timestamp", timestamp)
+            put("event_type", eventType)
+            put("value", value)
+            put("extras", extras)
+            put("source", "broadcast_receiver")
+            put("sync_status", 0)
         }
+        writableDatabase.insert(TABLE_RAW_SYSTEM_EVENTS, null, values)
     }
 }

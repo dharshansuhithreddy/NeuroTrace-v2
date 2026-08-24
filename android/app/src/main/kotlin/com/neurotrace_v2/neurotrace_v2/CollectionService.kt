@@ -1,16 +1,15 @@
 package com.neurotrace_v2.neurotrace_v2
 
 import android.app.*
+import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
-import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
@@ -20,19 +19,11 @@ class CollectionService : Service() {
     private val handler = Handler(Looper.getMainLooper())
 
     private lateinit var dbHelper: DatabaseHelper
-    private lateinit var powerManager: PowerManager
-    private lateinit var eventReceiver: EventReceiver
-
     private var isPolling = false
-
-    companion object {
-        const val ACTION_START_POLLING = "com.neurotrace_v2.ACTION_START_POLLING"
-        const val ACTION_STOP_POLLING = "com.neurotrace_v2.ACTION_STOP_POLLING"
-    }
 
     private val collectionRunnable = object : Runnable {
         override fun run() {
-            validateAndCollectUsage()
+            collectRawTelemetry()
             handler.postDelayed(this, INTERVAL)
         }
     }
@@ -40,77 +31,27 @@ class CollectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         dbHelper = DatabaseHelper(this)
-        powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-
-        eventReceiver = EventReceiver()
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_SCREEN_ON)
-            addAction(Intent.ACTION_SCREEN_OFF)
-            addAction(Intent.ACTION_USER_PRESENT)
-        }
-        registerReceiver(eventReceiver, filter)
-        Log.d(TAG, "CollectionService Created and Receiver Registered.")
+        Log.d(TAG, "Raw CollectionService Created.")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Enforce Android 8+ requirement, while satisfying targetSDK 36 strictness dynamically
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                1,
-                createNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
+            startForeground(1, createNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(1, createNotification())
         }
 
-        when (intent?.action) {
-            ACTION_STOP_POLLING -> {
-                Log.d(TAG, "Command Received: STOP_POLLING")
-                stopPolling()
-            }
-            ACTION_START_POLLING -> {
-                Log.d(TAG, "Command Received: START_POLLING")
-                startPolling()
-            }
-            else -> {
-                Log.d(TAG, "Service started normally, initiating collection loop.")
-                startPolling()
-            }
+        // Always ensure polling is running for continuous raw collection
+        if (!isPolling) {
+            isPolling = true
+            handler.post(collectionRunnable)
+            Log.d(TAG, "Continuous Raw Polling STARTED.")
         }
 
         return START_STICKY
     }
 
-    private fun startPolling() {
-        if (!isPolling) {
-            isPolling = true
-            handler.post(collectionRunnable)
-            Log.d(TAG, "Validation Engine: Foreground polling loop STARTED/RESUMED.")
-        }
-    }
-
-    private fun stopPolling() {
-        if (isPolling) {
-            isPolling = false
-            handler.removeCallbacks(collectionRunnable)
-            Log.d(TAG, "Validation Engine: Foreground polling loop STOPPED. CPU can sleep.")
-        }
-    }
-
-    private fun validateAndCollectUsage() {
-        val isScreenInteractive = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
-            powerManager.isInteractive
-        } else {
-            @Suppress("DEPRECATION")
-            powerManager.isScreenOn
-        }
-
-        if (!isScreenInteractive) {
-            Log.d(TAG, "Validation Engine: Screen is OFF. Skipping application session tracking.")
-            return
-        }
-
+    private fun collectRawTelemetry() {
         val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager
         if (usageStatsManager == null) {
             Log.e(TAG, "UsageStatsManager is null")
@@ -120,19 +61,46 @@ class CollectionService : Service() {
         val endTime = System.currentTimeMillis()
         val startTime = endTime - INTERVAL
 
+        // 1. Collect Raw Events (No filtering, exact replication of OS data)
+        val events = usageStatsManager.queryEvents(startTime, endTime)
+        val event = UsageEvents.Event()
+
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            dbHelper.insertRawUsageEvent(
+                packageName = event.packageName,
+                className = event.className,
+                eventType = event.eventType,
+                timestamp = event.timeStamp,
+
+                // Unresolved fields explicitly nulled to ensure compilation
+                instanceId = null,
+                taskRootPackageName = null,
+                taskRootClassName = null,
+                notificationChannelId = null,
+                locusId = null,
+
+                // Maintained backward-compatible fields
+                standbyBucket = if (Build.VERSION.SDK_INT >= 28) event.appStandbyBucket else null,
+                configuration = if (Build.VERSION.SDK_INT >= 21) event.configuration?.toString() else null,
+                shortcutId = if (Build.VERSION.SDK_INT >= 28) event.shortcutId else null
+            )
+        }
+
+        // 2. Collect UsageStats Aggregates (No launcher/package filtering)
         val stats = usageStatsManager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, startTime, endTime)
-
         for (stat in stats) {
-            if (stat.lastTimeUsed > startTime) {
-                val pkg = stat.packageName
-
-                if (pkg.contains("launcher") || pkg.contains("nexuslauncher") || pkg == packageName) {
-                    continue
-                }
-
-                Log.d(TAG, "Validated Session Saved: $pkg")
-                dbHelper.insertUsageEvent(stat.lastTimeUsed, pkg)
-            }
+            dbHelper.insertRawUsageStat(
+                packageName = stat.packageName,
+                firstTimeStamp = stat.firstTimeStamp,
+                lastTimeStamp = stat.lastTimeStamp,
+                lastTimeUsed = stat.lastTimeUsed,
+                totalTimeInForeground = stat.totalTimeInForeground,
+                lastTimeVisible = if (Build.VERSION.SDK_INT >= 29) stat.lastTimeVisible else null,
+                totalTimeVisible = if (Build.VERSION.SDK_INT >= 29) stat.totalTimeVisible else null,
+                lastTimeForegroundServiceUsed = if (Build.VERSION.SDK_INT >= 29) stat.lastTimeForegroundServiceUsed else null,
+                totalTimeForegroundServiceUsed = if (Build.VERSION.SDK_INT >= 29) stat.totalTimeForegroundServiceUsed else null
+            )
         }
     }
 
@@ -145,21 +113,16 @@ class CollectionService : Service() {
         }
         return NotificationCompat.Builder(this, channelId)
             .setContentTitle("NeuroTrace Active")
-            .setContentText("Collecting behavioral data for research.")
+            .setContentText("Collecting raw behavioral telemetry.")
             .setSmallIcon(android.R.drawable.ic_menu_info_details)
             .build()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        stopPolling()
+        isPolling = false
+        handler.removeCallbacks(collectionRunnable)
         dbHelper.close()
-
-        try {
-            unregisterReceiver(eventReceiver)
-        } catch (e: IllegalArgumentException) {
-            Log.e(TAG, "Receiver already unregistered")
-        }
         Log.d(TAG, "CollectionService Destroyed.")
     }
 
