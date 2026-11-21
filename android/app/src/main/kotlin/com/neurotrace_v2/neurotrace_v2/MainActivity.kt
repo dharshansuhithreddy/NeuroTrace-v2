@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
@@ -17,6 +18,7 @@ import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.HashMap
+import java.util.HashSet
 import java.util.Locale
 
 class MainActivity : FlutterActivity() {
@@ -187,6 +189,39 @@ class MainActivity : FlutterActivity() {
                         }
                     } catch (e: Exception) {
                         result.error("DB_UPDATE_ERROR", "Transactional status alteration failed: ${e.message}", null)
+                    }
+                }
+
+                "getInstalledApplications" -> {
+                    try {
+                        val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+                            addCategory(Intent.CATEGORY_LAUNCHER)
+                        }
+                        val resolveInfos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            packageManager.queryIntentActivities(mainIntent, PackageManager.ResolveInfoFlags.of(0.toLong()))
+                        } else {
+                            @Suppress("DEPRECATION")
+                            packageManager.queryIntentActivities(mainIntent, 0)
+                        }
+
+                        val appList = ArrayList<Map<String, Any>>()
+                        val seenPackages = HashSet<String>()
+                        for (resolveInfo in resolveInfos) {
+                            val pkgName = resolveInfo.activityInfo.packageName
+                            if (pkgName == packageName || !seenPackages.add(pkgName)) {
+                                continue
+                            }
+                            val appName = resolveInfo.loadLabel(packageManager)?.toString() ?: pkgName
+                            val appMap = HashMap<String, Any>()
+                            appMap["appName"] = appName
+                            appMap["packageName"] = pkgName
+                            appList.add(appMap)
+                        }
+
+                        appList.sortBy { it["appName"] as String }
+                        result.success(appList)
+                    } catch (e: Exception) {
+                        result.error("APP_LIST_ERROR", "Failed to retrieve installed applications: ${e.message}", null)
                     }
                 }
 
